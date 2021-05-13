@@ -6,7 +6,7 @@ Created on Sep 26, 2020
 
 class TierMogiPicklable(object):
 
-    def __init__(self, mogi_list, channel_id:int, llt, lmlt, lmllut, st, lpt, bagger_count, runner_count, host):
+    def __init__(self, mogi_list, channel_id:int, llt, lmlt, lmllut, st, lpt, bagger_count, runner_count, host, mogi_format, votes):
         '''
         Constructor
         '''
@@ -20,6 +20,16 @@ class TierMogiPicklable(object):
         self.bagger_count = bagger_count
         self.runner_count = runner_count
         self.host = host
+        self.mogi_format = mogi_format
+        self.votes = votes
+        
+    def __str__(self):
+        result_str = ""
+        for k, v in self.__dict__.items():
+            result_str += f"{str(k)}: {str(v)}, "
+        return result_str[:-2]
+    def __repr__(self):
+        return str(self)
     
     
     

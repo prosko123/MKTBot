@@ -17,7 +17,7 @@ import sys
 import atexit
 import signal
 import MMR
-
+import gspread
 
 bot_key = None
 testing_bot_key = None
@@ -25,7 +25,8 @@ pickle_dump_path = "tiers_pickle.pkl"
 private_info_file = "private.txt"
 
 pug_lounge_server_id = 629221606064914442
-new_pug_lounge_server_id = 816786965818245190
+
+new_pug_lounge_server_id = Shared.new_pug_lounge_server_id
 ECHELON_CATEGORY = 397230115400187907
 BOT_TESTING_CATEGORY = 1
 MODERATION_CATEGORY = 765290812686336001
@@ -37,34 +38,21 @@ bot_started = False
 tier_mogi_instances = None
 mmr_channel_instances = {}
 tier_instances = {}
-client = discord.Client()
+client = discord.Client(intents=discord.Intents.all())
 
 allowed_without_prefix = {"<:pepecan:822360781139345438>", "<:pepedrop:822360714978131988>", "<:pepec:768060077453737994>", "<:peped:768059756404670474>"}
 
+
+if DEBUGGING:
+    new_pug_lounge_server_id = 739733336871665696
 def command_allowed_without_prefix(message:str):
     for term in allowed_without_prefix:
         if message.startswith(term):
             return True
     return False
 
-
-def create_mmr_string(players:List[Tuple[int, str, discord.Member]]):
-    mmr_str = "**Player List**"
-    for index, player in enumerate(players, 1):
-        mmr_str += "\n`" + str(index) + ".` "
-        mmr_str += player[2].display_name + " (MMR: "
-        if player[0] == -1:
-            mmr_str += "NAN - Name doesn't match Lounge name"
-        else:
-            mmr_str += str(player[0])
-        mmr_str += ")"
-    return mmr_str
-
 @client.event
 async def on_message(message: discord.Message):
-    #mkwxSoup, roomID, rLID = await roomExistsLoop(roomID)
-    ##########################################################################################At this point, we know the room exists, and we certainly have rLID. We're not sure if we have the roomID yet though.    
-    #ignore everything outside of 5v5 Lounge
     if message.guild == None:
         return
     #ignore your own messages
@@ -72,7 +60,10 @@ async def on_message(message: discord.Message):
         return
     if message.author.bot:
         return
+    #ignore everything outside of 5v5 Lounge
     if message.guild.id != new_pug_lounge_server_id:
+        return
+    if not bot_started:
         return
     
     
@@ -103,7 +94,7 @@ async def on_message(message: discord.Message):
     
     #we know that the command starts with ^ or ! now - we check for ^ here and only allow certain commands
     #TODO: Come back here
-    if False and message_str[0] == Shared.alternate_prefix:
+    if message_str[0] == Shared.alternate_prefix:
         if Shared.is_in(message_str, Shared.player_data_commands, prefix=Shared.alternate_prefix):
             was_mmr_command = await channel_mmr.mmr_handle(message, Shared.alternate_prefix)
             if was_mmr_command:
@@ -112,21 +103,15 @@ async def on_message(message: discord.Message):
             was_other_command = await Shared.process_other_command(message, Shared.alternate_prefix)
             if was_other_command:
                 return
-            await tier_mogi.sent_message(message, tier_mogi_instances, Shared.alternate_prefix)
+        await tier_mogi.sent_message(message, tier_mogi_instances, Shared.alternate_prefix, client=client)
         return
     
     #Their command starts with !
     #TODO: Come back here
     
-    if Shared.is_in(message.content, TierMogi.teams_terms, Shared.prefix):
+    was_tier_mogi_command = await tier_mogi.sent_message(message, tier_mogi_instances, Shared.prefix, client=client)
+    if was_tier_mogi_command:
         return
-    elif Shared.is_in(message.content, TierMogi.teams_terms, Shared.alternate_prefix):
-        await tier_mogi.sent_message(message, tier_mogi_instances, Shared.alternate_prefix)
-    else:
-        await tier_mogi.sent_message(message, tier_mogi_instances, Shared.prefix)
-        
-        
-    return #don't check any further - we don't want mmr in Lounge, nor other commands
     
     was_mmr_command = await channel_mmr.mmr_handle(message)
     if was_mmr_command:
@@ -175,7 +160,8 @@ def private_data_init():
         bot_key = f.readline().strip("\n")
         Shared.google_api_key = f.readline().strip("\n")
         Shared.google_sheet_gid_url = Shared.google_sheets_url_base + Shared.google_sheet_id + "/values:batchGet?" + "key=" + Shared.google_api_key
-
+        Shared.gc = gspread.service_account(filename='credentials.json').open_by_key(Shared.google_sheet_id).worksheet(Shared.runner_leaderboard_name)
+        
 @client.event
 async def on_ready():
     """global user_flag_exceptions
@@ -185,7 +171,7 @@ async def on_ready():
     global bot_started
     
     if not bot_started:
-        if tier_mogi_instances == None:
+        if tier_mogi_instances is None:
             tier_mogi_instances = {}
             #TODO: COme back here
             if os.path.exists(pickle_dump_path):
@@ -235,23 +221,23 @@ async def on_ready():
         bot_started = True
     
 
-
-def on_exit():
-    print("Exiting...")
+def pickle_dump_tier_mogis():
     global tier_mogi_instances
     global pickle_dump_path
-    
     with open(pickle_dump_path, "wb") as pickle_out:
         try:
             mogis = {}
             for channel_id, mogi in tier_mogi_instances.items():
-                mogis[channel_id] = mogi.getPicklableTierMogi()
+                if not mogi.isEmpty():
+                    mogis[channel_id] = mogi.getPicklableTierMogi()
             p.dump(mogis, pickle_out)
         except:
             print("Could not dump pickle for tier instances.")
-            Shared.player_fc_pickle_dump()
-            raise
-        
+            
+def on_exit():
+    print("Exiting...")
+
+    pickle_dump_tier_mogis()
     Shared.player_fc_pickle_dump()
     
 
@@ -263,4 +249,7 @@ signal.signal(signal.SIGINT, handler)
 atexit.register(on_exit)
 
 private_data_init()
-client.run(bot_key)
+if DEBUGGING:
+    client.run(testing_bot_key)
+else:
+    client.run(bot_key)

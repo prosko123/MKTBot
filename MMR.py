@@ -7,7 +7,9 @@ import discord
 import Shared
 from datetime import datetime
 from Shared import stats_commands, mmr_lookup_terms
-
+MMR_ENABLED = False
+STATS_ENABLED = False
+MMRLU_ENABLED = True
 medium_delete = 10
 long_delete = 30
 
@@ -18,10 +20,6 @@ google_sheets_url_base = Shared.google_sheets_url_base
 google_sheet_id = Shared.google_sheet_id
 
 runner_leaderboard_name = Shared.runner_leaderboard_name
-bagger_leaderboard_name = Shared.bagger_leaderboard_name
-
-
-
 
 class MMR(object):
 
@@ -59,13 +57,12 @@ class MMR(object):
                     await message.channel.send("One of the names was too long. I'm not going to look this up.", delete_after=medium_delete)
                     return
                 
-        runner_mmr, bagger_mmr = await Shared.pull_all_mmr()
-        if runner_mmr == None or bagger_mmr == None:
+        runner_mmr = Shared.pull_all_mmr()
+        if runner_mmr == None:
             await message.channel.send("Could not pull mmr. Google Sheets isn't cooperating!", delete_after=medium_delete)
             return
         results_runner = Shared.get_mmr_for_names(to_look_up, runner_mmr)
-        results_bagger = Shared.get_mmr_for_names(to_look_up, bagger_mmr)
-        combined_mmrs = Shared.combine_and_sort_mmrs(results_runner, results_bagger) 
+        combined_mmrs = Shared.combine_and_sort_mmrs(results_runner, None) 
         
         if len(combined_mmrs) == 0:
             return
@@ -88,9 +85,9 @@ class MMR(object):
     async def mmr_handle(self, message:discord.Message, prefix=Shared.prefix):
         if not Shared.has_prefix(message.content, prefix):
             return False
-        if self.is_mmr_check(message.content, prefix):
+        if MMR_ENABLED and self.is_mmr_check(message.content, prefix):
             await self.send_mmr(message, prefix)
-        elif self.is_stats_check(message.content, prefix):
+        elif STATS_ENABLED and self.is_stats_check(message.content, prefix):
             await self.send_stats(message, prefix)
         else:
             return False

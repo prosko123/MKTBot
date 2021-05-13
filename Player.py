@@ -25,6 +25,7 @@ class Player(object):
         self.last_message_time = datetime.now()
         self.join_time = datetime.now()
         self.warned_already = False
+        self.rating = None
         
     def reconstruct(self, pickle_player:PlayerPicklable, member:discord.Member):
         self.member = member
@@ -32,9 +33,10 @@ class Player(object):
         self.last_message_time = pickle_player.last_message_time
         self.join_time = pickle_player.join_time
         self.warned_already = pickle_player.warned_already
+        self.rating = pickle_player.rating if 'rating' in pickle_player.__dict__ else None
     
     def getPickablePlayer(self):
-        return PlayerPicklable.PlayerPicklable(self.member.id, self.runner, self.last_message_time, self.join_time, self.warned_already)
+        return PlayerPicklable.PlayerPicklable(self.member.id, self.runner, self.last_message_time, self.join_time, self.warned_already, self.rating)
         
     
     
@@ -59,6 +61,14 @@ class Player(object):
     def should_drop(self):
         time_passed = datetime.now() - self.last_message_time
         return time_passed >= drop_period
+    
+    def __str__(self):
+        result_str = ""
+        for k, v in self.__dict__.items():
+            result_str += f"{str(k)}: {str(v)}, "
+        return result_str[:-2]
+    def __repr__(self):
+        return str(self)
         
         
         

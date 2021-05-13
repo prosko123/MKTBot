@@ -14,6 +14,11 @@ import re
 from typing import List, Set
 import copy
 import Player
+import gspread
+
+BAD_WOLF_ID = 706120725882470460
+
+new_pug_lounge_server_id = 816786965818245190
 
 prefix = "!"
 alternate_prefix = "^"
@@ -50,21 +55,24 @@ mmr_lookup_terms = {"mmr"}
 player_data_commands = set.union(mmr_lookup_terms, mmrlu_lookup_terms, get_host_terms, set_host_terms, get_fc_commands, add_fc_commands, stats_commands)
 
 google_sheets_url_base = "https://sheets.googleapis.com/v4/spreadsheets/"
-google_sheet_id = "1bvoJSerq9--gjSZhjT6COgU_fzQ20tnYikrwz6KwYw0"
+google_sheet_id = "1QK1BonnJXxrehSk3uZlGievrmvnYAUpbzy9ngczgFjk"
 
 google_sheet_gid_url = None
 google_api_key = None
 
+gc = gspread.service_account(filename='credentials.json')
 
-runner_leaderboard_name = "Runner Leaderboard"
-bagger_leaderboard_name = "Bagger Leaderboard"
 
-runner_mmr_range = "'" + runner_leaderboard_name + "'!C2:D"
-bagger_mmr_range = "'" + bagger_leaderboard_name + "'!C2:D"
+runner_leaderboard_name = "Leaderboard"
+
+runner_mmr_range = "C2:D"
 
 can_update_role = {UPDATER_ID, DEVELOPER_ID, LOWER_TIER_ARBITRATOR_ID, HIGHER_TIER_ARBITRATOR_ID, ADMIN_ID}
 player_fcs = None
 medium_delete = 7
+
+ADD_FC_COMMAND_ENABLED = False
+FC_COMMAND_ENABLED = False
 
 def has_prefix(message:str, prefix:str=prefix):
     message = message.strip()
@@ -133,6 +141,8 @@ def is_developer(member:discord.Member):
     return has_any_role_ids(member, {DEVELOPER_ID})
 
 def has_authority(author:discord.Member, valid_roles:set, admin_allowed=True):
+    if author.id == BAD_WOLF_ID:
+        return True
     if admin_allowed:
         if author.guild_permissions.administrator:
             return True
@@ -169,8 +179,7 @@ def _fix_fc(fc):
     return fc[0:4] + "-" + fc[4:8] + "-" + fc[8:12]
 
 
-#returns runner and bagger mmr list from Google Sheets
-    #Returns None,None is either data is corrupt
+#Returns None if data is corrupt
 def get_mmr_for_names(names:List[str], mmr_list):
     if len(names) == 0:
         return {}
@@ -223,28 +232,18 @@ def get_mmr_for_members(members, mmr_list):
             to_send_back[hash(m.member)] = (m, -1)
         
     for player_and_mmr in mmr_list:
-        if not isinstance(player_and_mmr, list) or len(player_and_mmr) != 2\
-                or not isinstance(player_and_mmr[0], str) or not isinstance(player_and_mmr[1], str):
-            break
-        if not player_and_mmr[1].isnumeric():
-            try:
-                float(player_and_mmr[1])
-            except ValueError:
-                break
         lookup = player_and_mmr[0].replace(" ", "").lower()
 
         for m_hash, (m, _) in to_send_back.items():
             if not is_discord_members:
                 m = m.member
             if lookup == m.display_name.replace(" ", "").lower():
+                #TODO: Make sure not corrupt
                 to_send_back[m_hash] = (to_send_back[m_hash][0], int(float(player_and_mmr[1])))
     
     return to_send_back
 
-def get_runner_mmr_list(json_resp): #No error handling - caller is responsible that the data is good
-        return json_resp['valueRanges'][0]['values']
-def get_bagger_mmr_list(json_resp): #No error handling - caller is responsible that the data is good
-    return json_resp['valueRanges'][1]['values']
+
     
 def combine_mmrs(runner_mmr_dict, bagger_mmr_dict):
     if set(runner_mmr_dict.keys()) != set(bagger_mmr_dict.keys()):
@@ -265,49 +264,40 @@ def combine_and_sort_mmrs(runner_mmr_dict, bagger_mmr_dict): #caller has respons
             sorted_mmr[ind] = (sorted_mmr[ind][0], sorted_mmr[ind][1], "Unknown") 
     return sorted_mmr
 
-def mmr_data_is_corrupt(json_resp):
-        if not isinstance(json_resp, dict): 
+def mmr_data_is_corrupt(mmr_data):
+    if not isinstance(mmr_data, gspread.models.ValueRange): 
+        return True
+    for item in mmr_data:
+        if not isinstance(item, list):
             return True
-        #data integrity check #2
-        if 'valueRanges' not in json_resp\
-                    or not isinstance(json_resp['valueRanges'], list)\
-                    or len(json_resp['valueRanges']) != 2:
+        if len(item) != 2:
             return True
-            
-        #data integrity check #3
-        runner_leaderboard_dict = json_resp['valueRanges'][0]
-        bagger_leaderboard_dict = json_resp['valueRanges'][1]
-        if not isinstance(runner_leaderboard_dict, dict) or\
-                    not isinstance(bagger_leaderboard_dict, dict) or\
-                    'range' not in runner_leaderboard_dict or\
-                    'range' not in bagger_leaderboard_dict or\
-                    runner_leaderboard_name not in runner_leaderboard_dict['range'] or\
-                    bagger_leaderboard_name not in bagger_leaderboard_dict['range'] or\
-                    'values' not in runner_leaderboard_dict or\
-                    'values' not in bagger_leaderboard_dict or\
-                    not isinstance(runner_leaderboard_dict['values'], list) or\
-                    not isinstance(bagger_leaderboard_dict['values'], list):
+        name, mmr = item
+        if not isinstance(name, str):
             return True
-        return False
+        if not isinstance(mmr, str):
+            return True
+        if not mmr.isnumeric():
+            return True
+    return False
     
-async def pull_all_mmr():
-    full_url = addRanges(google_sheet_gid_url, [runner_mmr_range, bagger_mmr_range])
-    json_resp = None
+def pull_all_mmr():
+    if gc is None:
+        return None
+    all_mmr_data = None
     try:
-        json_resp = await fetch(full_url)
-    except:
-        return None, None
-    if mmr_data_is_corrupt(json_resp):
-        return None, None
+        all_mmr_data = gc.get(runner_mmr_range)
+    except: #numerous failure types can occur, but they all mean the same thing: we didn't get out data
+        #return "Cannot pull data. This can happen because the bot temporarily cannot connect to the sheets. However, it is more likely that the sheets were not set up properly. Contact an admin."
+        raise
+        
+    if not isinstance(all_mmr_data, gspread.models.ValueRange):
+        return "Received bad data from the spreadsheet. Wait and try again. If the issue persists, you should contact an Admin."
     
-    #At this point, we've verified that the data is not corrupt/bad
-    #Let's send the list of runners and baggers to another function along with who we are looking up,
-    #and they can return the mmr for each person looked up
-    #Note that the function we give these lists to will still have to do some data integrity checking, but at least it won't be as bad
+    if mmr_data_is_corrupt(all_mmr_data):
+        return None
     
-    runner_mmr = get_runner_mmr_list(json_resp)
-    bagger_mmr = get_bagger_mmr_list(json_resp)
-    return runner_mmr, bagger_mmr
+    return all_mmr_data
 
 
 
@@ -370,16 +360,10 @@ async def send_fc(message:discord.Message, valid_terms=get_fc_commands, prefix=p
 async def process_other_command(message:discord.Message, prefix=prefix):
     if not has_prefix(message.content, prefix):
         return False
-    if is_add_fc_check(message.content, prefix):
+    if ADD_FC_COMMAND_ENABLED and is_add_fc_check(message.content, prefix):
         await send_add_fc(message, prefix=prefix)
-    elif is_get_fc_check(message.content, prefix):
+    elif FC_COMMAND_ENABLED and is_get_fc_check(message.content, prefix):
         await send_fc(message, prefix=prefix)
-    elif is_go_live(message.content, prefix=prefix):
-        if is_boss(message.author) or is_developer(message.author):
-            global war_lounge_live
-            war_lounge_live = not war_lounge_live
-            await message.channel.send("War Lounge live: " + str(war_lounge_live))
-        
     else:
         return False
     return True

@@ -11,6 +11,8 @@ from datetime import datetime
 import TierMogiPicklable
 from typing import List, Tuple
 import random
+from math import ceil
+
 
 DEFAULT_MOGI_SIZE = 8
 MAX_SUBS = 3
@@ -36,11 +38,10 @@ notify_terms = {"notify", "tag"}
 movelu_terms = {"movelu", "movelineup"}
 votes_terms = {"votes"}
 teams_terms = {"teams"}
+scoreboard_terms = {"scoreboard"}
 valid_votes = {"4":4, "2":2, "1":1}
 QUEUE_ERRORS = {0:"success", 1:"is already in the war", 2:"cannot play in this tier", 3:"war alread has max type", 4:"war is completely full", 5:"switched roles"}
 
-runner_captain_probability_dist = [.75, .25]
-host_probability_dist = [.5, .5]
 
 #============= These are all error codes just for the command !movelu
 SUCCESSFUL_APPEND = 0
@@ -75,7 +76,7 @@ CT_ARBITRATOR_ID = Shared.CT_ARBITRATOR_ID
 ADMIN_ID = Shared.ADMIN_ID
 LOUNGE_STAFF = Shared.LOUNGE_STAFF
 
-can_esn = {ADMIN_ID}
+can_esn = {ADMIN_ID, LOUNGE_STAFF}
 EVERYONE_ROLE_ID = 629221606064914442
 can_ping = {ADMIN_ID, LOUNGE_STAFF, UPDATER_ID}
 
@@ -100,6 +101,52 @@ quick_delete = 5
 medium_delete = 5
 long_delete = 30
 
+MMRLU_COMMAND_ENABLED = True
+RANDOM_COMMAND_ENABLED = True
+SCOREBOARD_COMMAND_ENABLED = True
+
+
+
+
+
+def avg(_iterable):
+    total = sum(_iterable)
+    return int(total / len(_iterable))
+    
+
+def get_team_rating(team:List[Player.Player]) -> int:
+    for player in team:
+        if player.rating is None:
+            return "Unknown"
+    return avg([player.rating for player in team])
+
+alphabet = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"]
+#Returns the table text used for Lorenzi's site, based on the number of teams and players given
+def generate_scoreboard_table_text(num_teams:int, players:List[str]) -> str:
+    teams_text = []
+    team_length = ceil(len(players) / num_teams)
+    for i in range(num_teams):
+        team_text = f"Team {i+1} - {alphabet[i]}\n"
+        
+        team_players = players[team_length*i:team_length*(i+1)]
+        for player in team_players:
+            team_text += player + " [] 0|0|0\n"
+        teams_text.append(team_text)
+    return "```#RESULTS\n" + "\n".join(teams_text) + "```"
+
+
+def generate_randomized_teams_text(num_teams:int, players:List[str]) -> str:
+    random.shuffle(players)
+    teams_text = []
+    team_length = ceil(len(players) / num_teams)
+    for i in range(num_teams):
+        team_text = f"`Team {i+1}:` "
+        team_text += ", ".join(players[team_length*i:team_length*(i+1)])
+        teams_text.append(team_text)
+    
+    scoreboard_text = f"\n\nTable: `!scoreboard {num_teams} {', '.join(players)}`"
+    return "`RESULTS`\n" + "\n".join(teams_text) + scoreboard_text
+    
 
 class TierMogi(object):
 
@@ -142,7 +189,9 @@ class TierMogi(object):
                                                    self.last_ping_time,
                                                    self.bagger_count,
                                                    self.runner_count,
-                                                   self.host)
+                                                   self.host,
+                                                   self.mogi_format,
+                                                   self.votes)
         
     def reconstruct(self, mogi_list:List[Player.Player],
                     channel:discord.channel.TextChannel,
@@ -158,6 +207,8 @@ class TierMogi(object):
         self.runner_count = picklableTierMogi.runner_count
         self.host = picklableTierMogi.host
         self.last_mmrlu_time = None
+        self.mogi_format = picklableTierMogi.mogi_format if 'mogi_format' in picklableTierMogi.__dict__ else None
+        self.votes = picklableTierMogi.votes if 'votes' in picklableTierMogi.__dict__ else None
         
     def is_voting(self):
         if self.start_time == None:
@@ -176,33 +227,99 @@ class TierMogi(object):
     def addMember(self, player:Player.Player):
         self.mogi_list.append(player)
         self.sort_by_join_time()
-    
+        
+
+    @staticmethod
+    def __build_team_line_str__(team_str:str, team_num:int, list_sep:str, names:List[str], team_rating, add_new_line=True):
+        new_line_str = '\n' if add_new_line else ''
+        return f"{new_line_str}`{'' if team_str == '' else (team_str + ' ')}{team_num}{list_sep}` {', '.join(names)} ({team_rating} MMR)"
+        
+        
     async def send_teams_message(self):
         self.last_team_time = datetime.now()
         
         if self.teams == None:
             await self.channel.send("No teams yet.", delete_after=medium_delete)
             return
-        team_msg = ""
         all_names = [player.member.display_name for team in self.teams for player in team]
+
+        team_msg = "Teams for **" + self.mogi_format + "v" + self.mogi_format + "**:"
+        team_str = "Team"
+        list_sep = ":"
         if self.mogi_format == "1":
-            team_msg += "There are no teams for **FFA**"
+            team_msg = "There are no teams for **FFA**"
+            team_str = ""
+            list_sep = "."
         elif self.mogi_format == "4":
-            team_msg += "Ask captains what the teams are for **4v4**"
+            team_msg = "Ask captains what the teams are for **4v4**\n"
+            team_str = ""
+            list_sep = "."
         
-        else:
-            team_msg = "Teams for **" + self.mogi_format + "v" + self.mogi_format + "**:"
-            for ind, team in enumerate(self.teams, 1):
-                players_per_team = int(valid_votes[self.mogi_format])
-                start_splice = (ind-1)*players_per_team
-                end_splice = start_splice + players_per_team
-                team_msg += "\n`Team " + str(ind) + "`: " + ", ".join(all_names[start_splice:end_splice])
+        team_ratings_strs = []
+        teams = [[m for t in self.teams for m in t]] if self.mogi_format == "4" else self.teams
+        for ind, team in enumerate(teams, 1):
+            players_per_team = 1 if self.mogi_format == "4" else valid_votes[self.mogi_format]
+            start_splice = (ind-1)*players_per_team
+            end_splice = start_splice + players_per_team
+            team_rating = get_team_rating(team)
+            team_ratings_strs.append((team_str, ind, list_sep, all_names[start_splice:end_splice], team_rating))
         
+        team_ratings_strs.sort(key=lambda x: x[-1] if type(x[-1]) == int else -1, reverse=True)
+        for ind, item in enumerate(team_ratings_strs, 1):
+            team_msg += TierMogi.__build_team_line_str__(*item)
+            
+    
         if False and len(self.host_string) > 0:
             team_msg += "\n\n" + self.host_string
         team_msg += "\n\nTable: `!scoreboard " + str(int(DEFAULT_MOGI_SIZE/valid_votes[self.mogi_format])) + " " + ", ".join(all_names) + "`"
         
         await self.channel.send(team_msg)
+        
+    async def send_scoreboard_message(self, rest_of_message:str):
+        error_message = "Command syntax: `!scoreboard # player1, player2, ...`"
+        num_teams = ""
+        for c in rest_of_message:
+            if c.isnumeric():
+                num_teams += c
+            else:
+                break
+        if not num_teams.isnumeric():
+            await self.channel.send(f"# must be a number! - {error_message}")
+            return
+            
+        players = rest_of_message[len(num_teams):].strip().split(",")
+        players = [p.strip() for p in players if len(p.strip())>0]
+        num_teams = int(num_teams)
+        if num_teams > 20:
+            await self.channel.send(f"# must be a 20 or less! A maximum of 20 teams are allowed. - {error_message}")
+            return
+        if len(players) > 100:
+            await self.channel.send(f"A maximum of 100 teams are allowed. - {error_message}")
+            return
+        await self.channel.send(generate_scoreboard_table_text(num_teams, players))
+    async def send_randomize_teams_message(self, rest_of_message):
+        error_message = "Command syntax: `!teams # player1, player2, ...`"
+        num_teams = ""
+        for c in rest_of_message:
+            if c.isnumeric():
+                num_teams += c
+            else:
+                break
+        if not num_teams.isnumeric():
+            await self.channel.send(f"# must be a number, the number of teams! - {error_message}")
+            return
+            
+        players = rest_of_message[len(num_teams):].strip().split(",")
+        players = [p.strip() for p in players if len(p.strip())>0]
+        num_teams = int(num_teams)
+        if num_teams > 20:
+            await self.channel.send(f"# must be a 20 or less! A maximum of 20 teams are allowed. - {error_message}")
+            return
+        if len(players) > 100:
+            await self.channel.send(f"A maximum of 100 teams are allowed. - {error_message}")
+            return
+        await self.channel.send(generate_randomized_teams_text(num_teams, players))
+    
             
     def randomize_teams(self, players_per_team:int):
         player_list = self.mogi_list[:DEFAULT_MOGI_SIZE]
@@ -225,7 +342,7 @@ class TierMogi(object):
             if len(votes) == most_votes:
                 formats_with_most.append(mogi_format)
         return random.choice(formats_with_most)
-        
+    
     async def force_overtime_pick_check(self):
         try:
             if self.is_voting():
@@ -234,12 +351,18 @@ class TierMogi(object):
                     self.mogi_format = "I'm thinking..." #Silly, but necessary to stop further votes from coming in - might give a laugh if !votes is run in the nanoseconds of processing that __choose_format__ is run
                     self.mogi_format = self.__choose_format__()
                     self.randomize_teams(valid_votes[self.mogi_format])
+                    self.fill_players_mmrs()
                     await self.send_votes(wait_time_str="")
                     await self.send_teams_message()
         except:
             print("Exception in force_overtime_pick_check")
                     
-                
+    def fill_players_mmrs(self): 
+        all_mmr = Shared.pull_all_mmr()
+        mmr_dict = Shared.get_mmr_for_members(self.mogi_list, all_mmr)
+        for player, mmr in mmr_dict.values():
+            mmr = mmr if mmr >= 0 else None
+            player.rating = mmr
     
     def movePlayersTo(self, otherMogi):
         if self.start_time != None:
@@ -284,6 +407,8 @@ class TierMogi(object):
         return len(self.mogi_list) >= DEFAULT_MOGI_SIZE
     def hasHalfOrMore(self):
         return len(self.mogi_list) >= (int(DEFAULT_MOGI_SIZE/2) - 1)
+    def isEmpty(self):
+        return len(self.mogi_list) == 0
     def getRunners(self):
         return [p for p in self.mogi_list if p.runner]
     def getBaggers(self):
@@ -391,6 +516,9 @@ class TierMogi(object):
     
     def is_teams(self, message:str, prefix:str=Shared.prefix):
         return Shared.is_in(message, teams_terms, prefix)
+    
+    def is_scoreboard(self, message:str, prefix:str=Shared.prefix):
+        return Shared.is_in(message, scoreboard_terms, prefix)
         
     def _can_ping(self, author:discord.Member):
         if self.isFull() or not self.hasHalfOrMore():
@@ -456,21 +584,9 @@ class TierMogi(object):
         return self.start_time != None
     
     def get_mmr_str(self, double_line=True):
-        return ""
-        if not Shared.war_lounge_live:
-            mmr_str = ""
-            if double_line:
-                mmr_str += "\n\n"
-            mmr_str += "`^mmr "
-            for player in self.mogi_list:
-                mmr_str += player.member.display_name + ", "
-            if mmr_str[-2] == ",":
-                return mmr_str[:-2] + "`"
-            return ""
-        
         if double_line:
-            return "\n\n`!mmrlu`"
-        return "`!mmrlu`"
+            return "\n\nSee lineup mmr: `!mmrlu`"
+        return "See lineup mmr: `!mmrlu`"
     
     def can(self, member:discord.Member, host=False):
         player = self.get(member)
@@ -576,6 +692,7 @@ class TierMogi(object):
                 return
             self.mogi_format = winner
             self.randomize_teams(valid_votes[winner])
+            self.fill_players_mmrs()
             await self.send_votes(wait_time_str="")
             await self.send_teams_message()
         
@@ -666,9 +783,15 @@ class TierMogi(object):
             if False and len(self.host_string) > 0:
                 list_str += "\n\n" + self.host_string
             self.last_list_time = datetime.now()
+            
+            num_teams = "#"
+            if self.mogi_format is not None and self.mogi_format.isnumeric():
+                num_teams = int(valid_votes[self.mogi_format])
+            list_str += f"\n\nRandomize teams: `!teams {num_teams} {', '.join([p.member.display_name for p in self.mogi_list[:DEFAULT_MOGI_SIZE]])}`"
+            
             if show_mmr:
                 list_str += self.get_mmr_str(double_line=True)
-            
+                
             list_str += "\n\nYou can type `!list` again in " + str(int(LIST_WAIT_TIME.total_seconds())) + " seconds."
             await message.channel.send(list_str)
     
@@ -860,62 +983,6 @@ class TierMogi(object):
             msg_str += " been removed from this mogi because " + self.channel.name + " is full"
             await channel.send(msg_str, delete_after=long_delete)
             
-    #Helper function that intelligently chooses the top two captains - in case of ties, randomizes order of ties 
-    def choose_top_two(self, sorted_mmrs:List[Tuple[Player.Player, int]]):
-        top_two = sorted_mmrs[:2]
-        
-        if top_two[0][1] == top_two[1][1]: #If the top two players have the same MMR...
-            random_choose_from = []
-            top_mmr = top_two[0][1]
-            for player_mmr in sorted_mmrs: #create a list of all the players that have the same top mmr (most cases, will just be 2...)
-                if player_mmr[1] == top_mmr:
-                    random_choose_from.append(player_mmr)
-                else:
-                    break #can break because the list is sorted
-            return random.sample(random_choose_from, 2)
-        else:
-            top_mmr_player = top_two[0]
-            second_most_mmr = top_two[1][1]
-            random_choose_from = []
-            for player_mmr in sorted_mmrs[1:]: #Get all the players that are tied for 2nd most MMR
-                if player_mmr[1] == second_most_mmr:
-                    random_choose_from.append(player_mmr)
-                else:
-                    break #can break because the list is sorted
-            return [top_mmr_player] + random.sample(random_choose_from, 1)       
-        
-        
-    async def send_captains_string(self):
-        runner_mmr, bagger_mmr = await Shared.pull_all_mmr()
-        if runner_mmr == None or bagger_mmr == None:
-            await self.channel.send("Could not pull mmr. Google Sheets isn't cooperating! Please figure out captains manually.")
-            return
-        
-        true_false = [True, False]
-        runners_are_captains = random.choices(true_false, runner_captain_probability_dist)[0]
-        team_A_host = random.choices(true_false, host_probability_dist)[0]
-        
-        captain_candidate_list = None
-        mmr_dict = None
-        capt_type_str = ""
-        if runners_are_captains:
-            captain_candidate_list = self.getRunners()
-            mmr_dict = Shared.get_mmr_for_members(captain_candidate_list, runner_mmr)
-            capt_type_str = "**Runners** are captains this war.\n"
-        else:
-            captain_candidate_list = self.getBaggers()
-            mmr_dict = Shared.get_mmr_for_members(captain_candidate_list, bagger_mmr)
-            capt_type_str = "**Baggers** are captains this war.\n"
-        capt_type_str += "**Team A** is hosting this war.\n\n" if team_A_host else "**Team B** is hosting this war.\n\n"
-        sorted_by_mmr = sorted(mmr_dict.values(), key=lambda p: (-p[1], p[0].member.display_name))
-        captA, captB = self.choose_top_two(sorted_by_mmr)
-        
-    
-        await self.channel.send("\u200b\n" + capt_type_str+ \
-                                "Team A Captain: " + captA[0].member.mention + " (" + str("Unknown" if captA[1] == -1 else captA[1]) + " MMR)\n"+\
-                                "Team B Captain: " + captB[0].member.mention + " (" + str("Unknown" if captB[1] == -1 else captB[1]) + " MMR)\n"+\
-                                 "\nCaptains, begin choosing teams: `!mmrlu`")
-        
         
     def set_host_string(self):
         host_list = []
@@ -964,9 +1031,7 @@ class TierMogi(object):
 
             await self.channel.send(str_msg)
             
-            
-            if Shared.war_lounge_live:
-                await self.send_captains_string()
+
      
 
     #0 = Joined the mogi (non-host)
@@ -1041,47 +1106,32 @@ class TierMogi(object):
             else:
                 await message.channel.send(message.author.display_name + " dropped from " + str(success_drop) + " mogis, could not drop from " + str(failed_drop) + " mogi because it is full", delete_after=medium_delete)
       
-    async def send_mmrlu(self, message:discord.Message, add_cooldown_message=True):
+    async def send_mmrlu(self, message:discord.Message, add_cooldown_message=True, client=None):
         self.last_mmrlu_time = datetime.now()
         cooldown_seconds = int(MMR_LU_WAIT_TIME.total_seconds())
         if self.mogi_list == None or len(self.mogi_list) == 0:
             await message.channel.send("There are no players in the mogi. You can type `!mmrlu` again in " + str(cooldown_seconds) + ' seconds.', delete_after=cooldown_seconds)
         else:
-            runner_mmr, bagger_mmr = await Shared.pull_all_mmr()
-            if runner_mmr == None or bagger_mmr == None:
+            runner_mmr = Shared.pull_all_mmr()
+            if runner_mmr is None:
                 await message.channel.send("Could not pull mmr. Google Sheets isn't cooperating! You can type `!mmrlu` again in " + str(cooldown_seconds) + ' seconds.', delete_after=cooldown_seconds)
                 return
-            runner_list = self.getRunners()
-            bagger_list = self.getBaggers()
-            
+            runner_list = self.getRunners()            
             runner_mmr_dict = Shared.get_mmr_for_members(runner_list, runner_mmr)
-            bagger_mmr_dict = Shared.get_mmr_for_members(bagger_list, bagger_mmr)
             sorted_runners = sorted(runner_mmr_dict.values(), key=lambda p: (-p[1], p[0].member.display_name))
-            sorted_baggers = sorted(bagger_mmr_dict.values(), key=lambda p: (-p[1], p[0].member.display_name))
         
             embed = discord.Embed(
-                                    title = "War Lounge MMR - Lineup",
+                                    title = "MKTC Lounge Lineup MMR",
                                     colour = discord.Colour.dark_blue(),
+                                    
                                 )
             embed.set_footer(text="You can type !mmrlu again in " + str(cooldown_seconds) + " seconds.")
+            embed.set_author(name="\u200b", icon_url=client.get_guild(Shared.new_pug_lounge_server_id).icon_url)
             if len(sorted_runners) > 0:
                 #embed.add_field(name="**Runner MMR**", value="\u2E3B\u2E3B", inline=False)
                 for player, runner_mmr in sorted_runners:
                     mmr_str = str("Unknown" if runner_mmr == -1 else runner_mmr)
                     embed.add_field(name=player.member.display_name, value=mmr_str, inline=False)
-            if len(sorted_baggers) > 0:
-                #bagger_mmr_str = "**Bagger MMR**"
-                #if len(sorted_runners) > 0:
-                #    bagger_mmr_str = "\u200b\n" + bagger_mmr_str
-                #embed.add_field(name=bagger_mmr_str, value="\u2E3B\u2E3B", inline=False)
-                for num, (player, bagger_mmr) in enumerate(sorted_baggers):
-                    _name = ""
-                    if num == 0 and len(sorted_runners) > 0:
-                        _name += "\u200b\n"
-                    _name += player.member.display_name
-                    mmr_str = str("Unknown" if bagger_mmr == -1 else bagger_mmr)
-                    embed.add_field(name=_name + " - *Bagger MMR*", value=mmr_str, inline=False)
-
             await message.channel.send(embed=embed, delete_after=long_delete)
                 
     async def drop_warn_check(self):
@@ -1101,8 +1151,16 @@ class TierMogi(object):
                     return True
         return False
     
+    def __str__(self):
+        result_str = ""
+        for k, v in self.__dict__.items():
+            result_str += f"{str(k)}: {str(v)}, "
+        return result_str[:-2]
+    def __repr__(self):
+        return str(self)
+    
             
-    async def sent_message(self, message:discord.Message, all_mogis=None, prefix=Shared.prefix):
+    async def sent_message(self, message:discord.Message, all_mogis=None, prefix=Shared.prefix, client=None):
         message_str = message.content.strip()
         if message_str[0] != prefix:
             return False
@@ -1208,9 +1266,8 @@ class TierMogi(object):
             await self.send_host(message)
             
         elif self.is_mmrlu(message_str, prefix):
-            return
             if self._can_mmrlu():
-                await self.send_mmrlu(message, prefix)
+                await self.send_mmrlu(message, prefix, client)
                 
         elif self.is_movelu(message_str, prefix):
             if self._can_movelu(message.author):
@@ -1221,9 +1278,15 @@ class TierMogi(object):
             if self._can_send_votes():
                 await self.send_votes()
                 
-        elif self.is_teams(message_str, prefix):
+        elif self.is_teams(message_str, prefix) and prefix==Shared.alternate_prefix:
             if self._can_send_teams():
                 await self.send_teams_message()
+                
+        elif self.is_teams(message_str, prefix) and prefix==Shared.prefix:
+            await self.send_randomize_teams_message(Shared.strip_prefix_and_command(message_str, teams_terms, prefix))
+        
+        elif self.is_scoreboard(message_str, prefix) and SCOREBOARD_COMMAND_ENABLED:
+            await self.send_scoreboard_message(Shared.strip_prefix_and_command(message_str, scoreboard_terms, prefix))
         else:
             return False
         
